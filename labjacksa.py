@@ -41,6 +41,8 @@ class StreamReader():
         self._channels = []
         # Sampling rate
         self._rate = 5000
+        # Status callback
+        self.status = ""
 
     def connect(self):
         self._device = u6.U6()
@@ -105,7 +107,7 @@ class StreamReader():
             self.start_acquisition()
         nchannels = len(data.keys())
         npoints = max(map(len, data.values()))
-        print ("Dropped %d of %d samples." % (dropped, npoints * nchannels))
+        #print ("Dropped %d of %d samples." % (dropped, npoints * nchannels))
         return {'rate':self._rate, 'n':npoints, 
                 'channels':data, 'dropped':dropped}
 
@@ -116,8 +118,11 @@ class StreamReader():
             dev.streamStop()
         except:
             pass
+        error = None
+        errcount = 0
         while not self.data_stop.is_set():
             self.data_request.wait()
+            self.status = "Waiting"
             # do acquisition
             self.data_ready.clear()
             self.buffer.clear()
@@ -129,20 +134,32 @@ class StreamReader():
             if nchannels == 0:
                 self.data_stop.set()
                 break
-            dev.streamConfig(NumChannels=nchannels, ChannelNumbers=channels, 
-                             ChannelOptions=[0]*nchannels, 
-                             ResolutionIndex=0, ScanFrequency=rate)
+            try:
+                dev.streamConfig(NumChannels=nchannels, ChannelNumbers=channels, 
+                                ChannelOptions=[0]*nchannels, 
+                                ResolutionIndex=0, ScanFrequency=rate)
+            except Exception as e:
+                self.status = "Error: %s" % e
+                print(e)
+                continue
             count = 0
             stream = dev.streamData(convert=False)
+            self.status = "Streaming"
             dev.streamStart()
-            while (not self.data_stop.is_set()) \
-                   and count < self.t_integrate * self._rate * nchannels:
+            while count < self.t_integrate * self._rate * nchannels:
+                if self.data_stop.is_set():
+                    break
                 try:
                     raw = next(stream)
                 except Exception as e:
+                    import traceback, sys
+                    traceback.print_exc(file=sys.stderr)
                     self.data_stop.set()
-                    print("Error:", e)
+                    error = e
                     break
+                if raw is None:
+                    self.status = "Error: no data"
+                    continue
                 # if (raw['errors'] + raw['missed']) > 0:
                 #     print(raw['errors'], raw['missed'])
                 #     for pkt, err in enumerate(raw['result'][11::64]):
@@ -153,10 +170,16 @@ class StreamReader():
                 count += raw['numPackets'] * self._device.streamSamplesPerPacket
                 self.buffer.append(raw)
             dev.streamStop()
-            self.data_request.clear()
+            if error is None:
+                self.data_request.clear()
             if not self.data_stop.is_set():
                 # set event
                 self.data_ready.set()
+        import traceback, sys
+        if error is None:
+            self.status = "Stopped."
+        else:
+            self.status = "Aborted: %s" % error
 
 
 class MyFigure(Figure):
@@ -260,7 +283,7 @@ class MyApp(tkinter.Frame):
             self._source.connect()
         except:
             # TODO: disable or hide hardware-related controls.
-            print("NO SOURCE")
+            self._status_label.set("No hardware.")
 
         # Set channels on StreamReader to match initial selection.
         self._on_channel_change()
@@ -270,6 +293,7 @@ class MyApp(tkinter.Frame):
     def _poll(self):
         # Poll for new data then initiate next poll event
         self._acquiring.set(self._source.is_running())
+        self._status_label.set(self._source.status)
         if self._source.data_ready.is_set():
             new_data = self._source.fetch_data()
             if new_data:
@@ -304,7 +328,6 @@ class MyApp(tkinter.Frame):
     def _on_data(self, data):
         """Process incoming data"""
         if not data:
-            self._status_label.set("")
             return
         self.last_data = self.new_data
         self.new_data = data
