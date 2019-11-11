@@ -154,9 +154,11 @@ class StreamReader():
             if self._acq_thread.is_alive():
                 self.status = "Acquisiton thread timed out"
 
-    def fetch_data(self, another=True):
+    def fetch_data(self):
         """Fetch data and start another acquisition once buffer is empty"""
-        self.data_ready.wait()
+        if not self.data_ready.wait(0.05):
+            return {}
+        self.data_ready.clear()
         data = {}
         dropped = 0
         while len(self.buffer) > 0:
@@ -168,12 +170,9 @@ class StreamReader():
                     data[k].extend(v)
                 else:
                     data[k] = v
-        if another and self._acq_thread.is_alive():
-            self.data_request.set()
-
         nchannels = len(data.keys())
         npoints = max(map(len, data.values()))
-        return {'rate':self._rate, 'n':npoints, 
+        return {'rate':self._rate, 'n':npoints,
                 'channels':data, 'dropped':dropped}
 
     def get_status(self):
@@ -189,8 +188,9 @@ class StreamReader():
         error = None
         errcount = 0
         while not self.data_stop.is_set():
-            self.data_request.wait()
-            self.status = "Waiting"
+            if not self.data_request.wait(0.01):
+                self.status = "Waiting"
+                continue
             # Do acquisition
             # Prevent data collection by client.
             self.data_ready.clear()
@@ -204,8 +204,8 @@ class StreamReader():
                 self.data_stop.set()
                 break
             try:
-                dev.streamConfig(NumChannels=nchannels, ChannelNumbers=channels, 
-                                ChannelOptions=[0]*nchannels, 
+                dev.streamConfig(NumChannels=nchannels, ChannelNumbers=channels,
+                                ChannelOptions=[0]*nchannels,
                                 ResolutionIndex=0, ScanFrequency=rate)
             except Exception as e:
                 self.status = "Error: %s" % e
@@ -272,7 +272,7 @@ class DataHandler():
             return ""
         elif time.time() - self._status[0] > 5:
             if self._path:
-                self._status = (time.time(), 
+                self._status = (time.time(),
                                 "Saving all to %s." % os.path.basename(self._path))
             else:
                 self._status = (None, "")
@@ -355,7 +355,7 @@ class DataHandler():
 class LiveFigure(Figure):
     def __init__(self, *args, **kwargs):
         """Figure with t- and f-axes."""
-        # Maintain a mapping 
+        # Maintain a mapping
         self._lines = {}
         super().__init__(*args, **kwargs)
         self._axes_t = self.add_subplot(211)
@@ -380,7 +380,8 @@ class LiveFigure(Figure):
             if k.lstrip('f_') not in data['channels']:
                 self._lines.pop(k).remove()
         # Add or update line for incoming data.
-        for k,v in data['channels'].items():
+        for k,v_as_list in data['channels'].items():
+            v = np.multiply(data['prefactor'], v_as_list)
             f, p = periodogram(v, fs=data['rate'], window='hann', scaling='density')
             if k not in self._lines:
                 pts = len(v)
@@ -398,6 +399,8 @@ class LiveFigure(Figure):
         # Update the legend.
         self.legends = [self.legend(mode='expand', ncol=4)]
         # Rescale if requested.
+        self._axes_t.set_ylabel(data['unit'])
+        self._axes_f.set_ylabel(data['unit'] + ' / $\sqrt{\mathrm{Hz}}$')
         if self._rescale:
             for ax in self.axes:
                 ax.relim()
@@ -411,6 +414,8 @@ class LJSAApp(tkinter.ttk.Frame):
         super().__init__(*args, **kwargs)
         from tkinter import TOP, BOTTOM, LEFT, RIGHT, BOTH
         from tkinter.ttk import Checkbutton, Button, Label, Frame
+        # Acquire continuously
+        self._continuous = False
         # Data source
         self._source = StreamReader()
         # File writer
@@ -423,6 +428,8 @@ class LJSAApp(tkinter.ttk.Frame):
         # Sampling integration time
         self._time = tkinter.IntVar()
         self._time.set(2)
+        # Data scaling
+        self._scaling = {'prefactor': 1.0, 'unit': 'V'}
         # Flag: save all data to a folder
         self._save_all = tkinter.BooleanVar()
         # Channel enable flags
@@ -435,7 +442,7 @@ class LJSAApp(tkinter.ttk.Frame):
         FigureCanvasTkAgg(self._fig, master=self)
         # Figure toolbar
         toolbar = NavigationToolbar2Tk(self._fig.canvas, self)
-        toolbar.update()    
+        toolbar.update()
         toolbar.pack(side=TOP)
         self._fig.canvas.get_tk_widget().pack(side=TOP, fill=BOTH, expand=1)
         # Area for channel selection, start/stop/save controls and status.
@@ -445,20 +452,24 @@ class LJSAApp(tkinter.ttk.Frame):
             cb = Checkbutton(buttonbar, text="AIN%d" % i, variable=v,
                              command=self._on_channel_change)
             cb.pack(side=LEFT, expand=0, padx=4)
-
+        # Buttons, right to left
         buttons = [
-                   ("Save one", self._save_current),
+                   ("Save last", self._save_current),
                    ("Stop", self._source.stop_acquisition),
                    ("Start", self.start),
                    ]
 
         last_button = None
         for label, fn in buttons:
-            b = Button(master=buttonbar, text=label, command=fn)
+            if label is "Start":
+                b = Button(master=buttonbar, text=label)
+                b.bind('<Button>', fn)
+            else:
+                b = Button(master=buttonbar, text=label, command=fn)
             b.pack(side=RIGHT)
-            if last_button is not None:
-                b.lower(belowThis=last_button)
-            last_button = b
+            #if last_button is not None:
+            #    b.lower(belowThis=last_button)
+            #last_button = b
 
         cb = Checkbutton(buttonbar, text="save all", variable=self._save_all,
                          command=self._on_save_all)
@@ -474,6 +485,7 @@ class LJSAApp(tkinter.ttk.Frame):
         self._menus = OrderedDict()
         self._menus['freq'] = tkinter.Menu(self, tearoff=False)
         self._menus['time'] = tkinter.Menu(self, tearoff=False)
+        self._menus['scaling'] = tkinter.Menu(self, tearoff=False)
         # Populate sample-freq menu
         self._fill_freq_menu()
         # Populate sample-time menu
@@ -486,6 +498,9 @@ class LJSAApp(tkinter.ttk.Frame):
         menubar.add_command(label="Open", command=self._on_open)
         for k, m in self._menus.items():
             menubar.add_cascade(label=k.capitalize(), menu=m)
+        self._menus['scaling'].add_command(label='set unit', command=self._set_unit)
+        self._menus['scaling'].add_command(label='set prefactor', command=self._set_prefactor)
+        #menubar.add_command(label="Scaling", command=self._change_scaling)
         menubar.add_command(label="About", command=self._about)
         self.master.config(menu=menubar)
         # Traces on sampling variables to configure hardware and rescale axes.
@@ -501,6 +516,19 @@ class LJSAApp(tkinter.ttk.Frame):
     def _about(self):
         from tkinter.messagebox import showinfo
         showinfo(title="About", message=__doc__.replace('\n\n', '\r\r').replace('\n', ' '))
+
+    def _set_unit(self):
+        unit = tkinter.simpledialog.askstring("Scaling: unit", "Enter unit string",
+                                              parent=self, initialvalue=self._scaling['unit'])
+        if unit is not None:
+            self._scaling['unit'] = unit
+
+    def _set_prefactor(self):
+        pref = tkinter.simpledialog.askfloat("Scaling: prefactor", "Enter prefactor as float",
+                                             parent=self, initialvalue=self._scaling['prefactor'])
+        if pref is not None:
+            self._scaling['prefactor'] = pref
+            self._fig.rescale()
 
     def _on_open(self):
         from tkinter import filedialog
@@ -550,16 +578,21 @@ class LJSAApp(tkinter.ttk.Frame):
         if fname:
             self._writer.save_one(fname, data)
 
-    def start(self):
+    def start(self, evt):
+        if evt.num == 1:
+            self._continuous = True
+        else:
+            self._continuous = False
         self._source.start_acquisition()
         self._fig.rescale()
 
     def _poll(self):
         # Poll for new data then initiate next poll event
-        if self._source.data_ready.is_set():
-            new_data = self._source.fetch_data()
-            if new_data:
-                self._on_data(new_data)
+        new_data = self._source.fetch_data()
+        if new_data:
+            self._on_data(new_data)
+            if self._continuous:
+                self._source.start_acquisition()
         streamstatus = self._source.get_status()
         filestatus = self._writer.get_status()
         if self.new_data:
@@ -569,7 +602,7 @@ class LJSAApp(tkinter.ttk.Frame):
         else:
             dropped = ""
         self._status_label.set("\t".join((streamstatus, dropped, filestatus)))
-        self.after(200, self._poll)
+        self.after(100, self._poll)
 
     def _quit(self):
         self._source.stop_acquisition()
@@ -589,6 +622,7 @@ class LJSAApp(tkinter.ttk.Frame):
         if not data:
             return
         self.new_data = data
+        self.new_data.update(self._scaling)
         self._fig.on_data(data)
         if self._save_all.get():
             self._writer.save_continuous(data)
