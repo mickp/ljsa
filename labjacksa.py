@@ -39,6 +39,7 @@ from scipy.signal import periodogram
 import matplotlib.pyplot as plt
 import threading
 from collections import deque
+import json
 import time
 import os
 
@@ -172,7 +173,7 @@ class StreamReader():
                     data[k] = v
         nchannels = len(data.keys())
         npoints = max(map(len, data.values()))
-        return {'rate':self._rate, 'n':npoints,
+        return {'rate':self._rate, 'points':npoints,
                 'channels':data, 'dropped':dropped}
 
     def get_status(self):
@@ -254,19 +255,6 @@ class DataHandler():
         self._path = None
         self._status = (None, "")
 
-    @staticmethod
-    def data_to_lines(data):
-        # Output data. Use scientific notation with 5 digits which is about
-        # the precision to be expected  from a 16-bit measurement.
-        yield "rate:      {:f}\n".format(data['rate'])
-        yield "dropped:   {:d}\n".format(data['dropped'])
-        yield "points:    {:d}\n".format(data['n'])
-        nchan = len(data['channels'])
-        fstr = (nchan*"{:>12.5e},  ").rstrip(', ')
-        yield (nchan*"{:>12s},  ").rstrip(', ').format(*data['channels'].keys()) + "\n"
-        for z in zip(*data['channels'].values()):
-            yield fstr.format(*z) + "\n"
-
     def get_status(self):
         if self._status[0] is None:
             return ""
@@ -298,46 +286,23 @@ class DataHandler():
                           "Saving all to %s." % os.path.basename(self._path))
 
     def load_one(self, fpath):
-        data = {}
-        data['channels'] = {}
         with open(fpath, 'r') as fh:
-            while True:
-                l = fh.readline()
-                tok = l.replace(' ', '').split(':')
-                if ":" not in l:
-                    break
-                elif tok[0] == 'rate':
-                    data['rate'] = float(tok[1])
-                elif tok[0] == 'dropped':
-                    data['dropped'] = int(tok[1])
-                elif tok[0] == 'points':
-                    data['n'] = int(tok[1])
-            chs = l.split()
-            for c in chs:
-                data['channels'][c] = []
-            while True:
-                l = fh.readline()
-                if not l:
-                    break
-                pts = l.split()
-                for i, c in enumerate(chs):
-                    data['channels'][c].append(float(pts[i]))
-        return data
+            return json.load(fh)
 
-    def save_one(self, fpath, data):
+    def save_one(self, fpath, data_in):
+        # Set key order for output.
+        data = dict.fromkeys(['prefactor', 'unit', 'rate',
+                              'points', 'dropped', 'channels'])
+        data.update(data_in)
         status = "Writing to file %s." % os.path.basename(fpath)
         error = False
         with open(fpath, 'w') as fh:
             try:
-                fh.writelines(self.data_to_lines(data))
-            except:
-                error = True
-        if error:
-            status = "Error writing to %s." % os.path.basename(fpath)
-        else:
-            status = "Save complete."
+                json.dump(data, fh)
+                status = "Save complete."
+            except Exception as e:
+                status = "Error writing to %s." % os.path.basename(fpath)
         self._status = (time.time(), status)
-        return error
 
     def set_save_all(self, fpath):
         self._path = fpath
@@ -348,6 +313,7 @@ class DataHandler():
                 os.makedirs(fpath)
             except:
                 self._status = (time.time(), "Error creating folders.")
+
     def clear_save_all(self):
         self._path = None
 
@@ -373,7 +339,7 @@ class LiveFigure(Figure):
 
     def on_data(self, data={}):
         """Update the plots with incoming data"""
-        x = np.linspace(0, data['n'] / data['rate'], data['n'])
+        x = np.linspace(0, data['points'] / data['rate'], data['points'])
         labels = {}
         # Remove lines not found in data.
         for k in set(self._lines):
@@ -544,7 +510,7 @@ class LJSAApp(tkinter.ttk.Frame):
     def _on_save_all(self):
         if self._save_all.get():
             from tkinter import filedialog
-            folder = filedialog.askdirectory(title="Choose a folder (type in 'Selection' to create new)")
+            folder = filedialog.askdirectory(title="Choose folder or enter new folder name")
             if folder:
                 self._writer.set_save_all(folder)
             else:
@@ -598,7 +564,7 @@ class LJSAApp(tkinter.ttk.Frame):
         if self.new_data:
             dropped = "    Dropped %d of %d points.    " % (
                                 self.new_data['dropped'],
-                                self.new_data['n']*len(self.new_data['channels']))
+                                self.new_data['points']*len(self.new_data['channels']))
         else:
             dropped = ""
         self._status_label.set("\t".join((streamstatus, dropped, filestatus)))
