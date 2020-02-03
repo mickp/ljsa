@@ -1,22 +1,5 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-## Copyright (C) 2019 Mick Phillips <mick.phillips@gmail.com>
-##
-## This file is part of LabJackSpectrumAnalyzer
-##
-## LabJackSpectrumAnalyzer is free software: you can redistribute it and/or
-## modify it under the terms of the GNU General Public License as published
-## by the Free Software Foundation, either version 3 of the License, or (at
-## your option) any later version.
-##
-## LabJackSpectrumAnalyser is distributed in the hope that it will be useful,
-## but WITHOUT ANY WARRANTY; without even the implied warranty of
-## MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
-## Public License for more details.
-##
-## You should have received a copy of the GNU General Public License along
-## with LabJackSpectrumAnalyzer. If not, see <http://www.gnu.org/licenses/>.
-
 """LabJackSpectrumAnalyzer
 
 Turns a LabJack U6 into a simple spectrum analyzer!
@@ -36,11 +19,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 import numpy as np
 from scipy.signal import periodogram
-import matplotlib.pyplot as plt
 import threading
 from collections import deque
 import json
 import time
+import tkinter.ttk
 import os
 
 from typing import List, Optional
@@ -49,13 +32,12 @@ import tkinter
 from matplotlib.backends.backend_tkagg import (
     FigureCanvasTkAgg, NavigationToolbar2Tk)
 # Implement the default Matplotlib key bindings.
-from matplotlib.backend_bases import key_press_handler
 from matplotlib.figure import Figure
 
 import u6
-from LabJackPython import *
 
 MAXSAMPLERATE = 50000
+
 
 class StreamReader():
     def __init__(self):
@@ -95,7 +77,7 @@ class StreamReader():
         if self._device is not None:
             try:
                 self._device.streamStop()
-            except:
+            except Exception:
                 pass
             self._device.close()
 
@@ -103,7 +85,7 @@ class StreamReader():
         """Return True if acquisition thread is running"""
         return self._acq_thread is not None and self._acq_thread.is_alive()
 
-    def set_channels(self, channels : List[int]):
+    def set_channels(self, channels: List[int]):
         """Set list of channels to acquire"""
         if self.is_running():
             self.stop_acquisition()
@@ -112,7 +94,8 @@ class StreamReader():
         else:
             self._channels = channels
 
-    def set_sampling(self, rate: Optional[int]=None, time: Optional[float]=None):
+    def set_sampling(self, rate: Optional[int] = None,
+                     time: Optional[float] = None):
         if self.is_running():
             self.stop_acquisition()
             restart = True
@@ -130,18 +113,20 @@ class StreamReader():
         if self._device is None:
             try:
                 self.connect()
-            except:
+            except Exception:
                 self.status = "No hardware connected."
                 return False
         if len(self._channels) == 0:
             self.status = "No channels selected."
             return False
         if self._rate > (MAXSAMPLERATE / len(self._channels)):
-            self.status = "Sample rate too high for %d channels." % len(self._channels)
+            self.status = "Sample rate too high for %d channels." % \
+                          len(self._channels)
             return False
         if self._acq_thread is None or not self._acq_thread.is_alive():
             self.data_stop.clear()
-            self._acq_thread = threading.Thread(target=self._acquire_loop, daemon=True)
+            self._acq_thread = threading.Thread(target=self._acquire_loop,
+                                                daemon=True)
             self._acq_thread.start()
         self.data_request.set()
         return True
@@ -166,15 +151,14 @@ class StreamReader():
             raw = self.buffer.popleft()
             dropped += raw['missed']
             processed = self._device.processStreamData(raw['result'])
-            for k,v in processed.items():
+            for k, v in processed.items():
                 if k in data:
                     data[k].extend(v)
                 else:
                     data[k] = v
-        nchannels = len(data.keys())
         npoints = max(map(len, data.values()))
-        return {'rate':self._rate, 'points':npoints,
-                'channels':data, 'dropped':dropped}
+        return {'rate': self._rate, 'points': npoints,
+                'channels': data, 'dropped': dropped}
 
     def get_status(self):
         return self.status
@@ -184,10 +168,9 @@ class StreamReader():
         dev = self._device
         try:
             dev.streamStop()
-        except:
+        except Exception:
             pass
         error = None
-        errcount = 0
         while not self.data_stop.is_set():
             if not self.data_request.wait(0.01):
                 self.status = "Waiting"
@@ -205,23 +188,25 @@ class StreamReader():
                 self.data_stop.set()
                 break
             try:
-                dev.streamConfig(NumChannels=nchannels, ChannelNumbers=channels,
-                                ChannelOptions=[0]*nchannels,
-                                ResolutionIndex=0, ScanFrequency=rate)
+                dev.streamConfig(NumChannels=nchannels,
+                                 ChannelNumbers=channels,
+                                 ChannelOptions=[0]*nchannels,
+                                 ResolutionIndex=0, ScanFrequency=rate)
             except Exception as e:
                 self.status = "Error: %s" % e
                 continue
-            count = 0
+            npts = 0
             stream = dev.streamData(convert=False)
             self.status = "Streaming"
             dev.streamStart()
-            while count < self._t_integrate * self._rate * nchannels:
+            while npts < self._t_integrate * self._rate * nchannels:
                 if self.data_stop.is_set():
                     break
                 try:
                     raw = next(stream)
                 except Exception as e:
-                    import traceback, sys
+                    import traceback
+                    import sys
                     traceback.print_exc(file=sys.stderr)
                     self.data_stop.set()
                     error = e
@@ -236,7 +221,7 @@ class StreamReader():
                 #         if errNum != 0:
                 #             #Error detected in this packet
                 #             print ("Packet", pkt, "error:", errNum)
-                count += raw['numPackets'] * self._device.streamSamplesPerPacket
+                npts += raw['numPackets'] * self._device.streamSamplesPerPacket
                 self.buffer.append(raw)
             dev.streamStop()
             if error is None:
@@ -260,8 +245,8 @@ class DataHandler():
             return ""
         elif time.time() - self._status[0] > 5:
             if self._path:
-                self._status = (time.time(),
-                                "Saving all to %s." % os.path.basename(self._path))
+                sstr = "Saving all to %s." % os.path.basename(self._path)
+                self._status = (time.time(), sstr)
             else:
                 self._status = (None, "")
         return self._status[1]
@@ -283,7 +268,7 @@ class DataHandler():
             pass
         else:
             self.status = (time.time(),
-                          "Saving all to %s." % os.path.basename(self._path))
+                           "Saving all to %s." % os.path.basename(self._path))
 
     def load_one(self, fpath):
         with open(fpath, 'r') as fh:
@@ -295,12 +280,11 @@ class DataHandler():
                               'points', 'dropped', 'channels'])
         data.update(data_in)
         status = "Writing to file %s." % os.path.basename(fpath)
-        error = False
         with open(fpath, 'w') as fh:
             try:
                 json.dump(data, fh)
                 status = "Save complete."
-            except Exception as e:
+            except Exception:
                 status = "Error writing to %s." % os.path.basename(fpath)
         self._status = (time.time(), status)
 
@@ -311,7 +295,7 @@ class DataHandler():
         if not os.path.exists(fpath):
             try:
                 os.makedirs(fpath)
-            except:
+            except Exception:
                 self._status = (time.time(), "Error creating folders.")
 
     def clear_save_all(self):
@@ -340,15 +324,15 @@ class LiveFigure(Figure):
     def on_data(self, data={}):
         """Update the plots with incoming data"""
         x = np.linspace(0, data['points'] / data['rate'], data['points'])
-        labels = {}
         # Remove lines not found in data.
         for k in set(self._lines):
             if k.lstrip('f_') not in data['channels']:
                 self._lines.pop(k).remove()
         # Add or update line for incoming data.
-        for k,v_as_list in data['channels'].items():
+        for k, v_as_list in data['channels'].items():
             v = np.multiply(data['prefactor'], v_as_list)
-            f, p = periodogram(v, fs=data['rate'], window='hann', scaling='density')
+            f, p = periodogram(v, fs=data['rate'],
+                               window='hann', scaling='density')
             if k not in self._lines:
                 pts = len(v)
                 self._lines[k] = self._axes_t.plot(x[:pts], v)[0]
@@ -366,7 +350,7 @@ class LiveFigure(Figure):
         self.legends = [self.legend(mode='expand', ncol=4)]
         # Rescale if requested.
         self._axes_t.set_ylabel(data['unit'])
-        self._axes_f.set_ylabel(data['unit'] + ' / $\sqrt{\mathrm{Hz}}$')
+        self._axes_f.set_ylabel(data['unit'] + " / $\\sqrt{\\mathrm{Hz}}$")
         if self._rescale:
             for ax in self.axes:
                 ax.relim()
@@ -374,7 +358,6 @@ class LiveFigure(Figure):
             self._rescale = False
 
 
-import tkinter.ttk
 class LJSAApp(tkinter.ttk.Frame):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -424,18 +407,13 @@ class LJSAApp(tkinter.ttk.Frame):
                    ("Stop", self._source.stop_acquisition),
                    ("Start", self.start),
                    ]
-
-        last_button = None
         for label, fn in buttons:
-            if label is "Start":
+            if label == "Start":
                 b = Button(master=buttonbar, text=label)
                 b.bind('<Button>', fn)
             else:
                 b = Button(master=buttonbar, text=label, command=fn)
             b.pack(side=RIGHT)
-            #if last_button is not None:
-            #    b.lower(belowThis=last_button)
-            #last_button = b
 
         cb = Checkbutton(buttonbar, text="save all", variable=self._save_all,
                          command=self._on_save_all)
@@ -443,7 +421,7 @@ class LJSAApp(tkinter.ttk.Frame):
         buttonbar.pack(fill=tkinter.X)
 
         lbl = Label(self, relief=tkinter.SUNKEN, anchor=tkinter.W,
-                            textvariable=self._status_label)
+                    textvariable=self._status_label)
         lbl.pack(side=BOTTOM, fill=tkinter.X)
 
         # Menu to set sampling rate
@@ -457,16 +435,17 @@ class LJSAApp(tkinter.ttk.Frame):
         # Populate sample-time menu
         for t in [1, 2, 3, 4, 5, 10]:
             txt = "%.2f s" % t
-            cmd = lambda t=t: self._source.set_sampling(time=t)
-            self._menus['time'].add_radiobutton(label=txt, value=t, variable=self._time)
+            self._menus['time'].add_radiobutton(label=txt, value=t,
+                                                variable=self._time)
         # Sampling settings menus
-        menubar =  tkinter.Menu(self.master)
+        menubar = tkinter.Menu(self.master)
         menubar.add_command(label="Open", command=self._on_open)
         for k, m in self._menus.items():
             menubar.add_cascade(label=k.capitalize(), menu=m)
-        self._menus['scaling'].add_command(label='set unit', command=self._set_unit)
-        self._menus['scaling'].add_command(label='set prefactor', command=self._set_prefactor)
-        #menubar.add_command(label="Scaling", command=self._change_scaling)
+        self._menus['scaling'].add_command(label='set unit',
+                                           command=self._set_unit)
+        self._menus['scaling'].add_command(label='set prefactor',
+                                           command=self._set_prefactor)
         menubar.add_command(label="About", command=self._about)
         self.master.config(menu=menubar)
         # Traces on sampling variables to configure hardware and rescale axes.
@@ -481,17 +460,21 @@ class LJSAApp(tkinter.ttk.Frame):
 
     def _about(self):
         from tkinter.messagebox import showinfo
-        showinfo(title="About", message=__doc__.replace('\n\n', '\r\r').replace('\n', ' '))
+        showinfo(title="About",
+                 message=__doc__.replace('\n\n', '\r\r').replace('\n', ' '))
 
     def _set_unit(self):
-        unit = tkinter.simpledialog.askstring("Scaling: unit", "Enter unit string",
-                                              parent=self, initialvalue=self._scaling['unit'])
+        unit = tkinter.simpledialog.askstring("Scaling: unit",
+                                              "Enter unit string", parent=self,
+                                              initialvalue=self._scaling['unit'])
         if unit is not None:
             self._scaling['unit'] = unit
 
     def _set_prefactor(self):
-        pref = tkinter.simpledialog.askfloat("Scaling: prefactor", "Enter prefactor as float",
-                                             parent=self, initialvalue=self._scaling['prefactor'])
+        pref = tkinter.simpledialog.askfloat("Scaling: prefactor",
+                                             "Enter prefactor as float",
+                                             parent=self,
+                                             initialvalue=self._scaling['prefactor'])
         if pref is not None:
             self._scaling['prefactor'] = pref
             self._fig.rescale()
@@ -510,7 +493,8 @@ class LJSAApp(tkinter.ttk.Frame):
     def _on_save_all(self):
         if self._save_all.get():
             from tkinter import filedialog
-            folder = filedialog.askdirectory(title="Choose folder or enter new folder name")
+            folder = filedialog.askdirectory(title="Choose folder or enter "
+                                             "new folder name")
             if folder:
                 self._writer.set_save_all(folder)
             else:
@@ -540,7 +524,8 @@ class LJSAApp(tkinter.ttk.Frame):
         if not data:
             return
         from tkinter import filedialog
-        fname = filedialog.asksaveasfilename(filetypes=(("plain text", "*.txt"),))
+        fname = filedialog.asksaveasfilename(filetypes=(("plain text",
+                                                         "*.txt"),))
         if fname:
             self._writer.save_one(fname, data)
 
@@ -562,9 +547,9 @@ class LJSAApp(tkinter.ttk.Frame):
         streamstatus = self._source.get_status()
         filestatus = self._writer.get_status()
         if self.new_data:
-            dropped = "    Dropped %d of %d points.    " % (
-                                self.new_data['dropped'],
-                                self.new_data['points']*len(self.new_data['channels']))
+            ndropped = self.new_data['dropped']
+            ntot = self.new_data['points'] * len(self.new_data['channels'])
+            dropped = "    Dropped %d of %d points.    " % (ndropped, ntot)
         else:
             dropped = ""
         self._status_label.set("\t".join((streamstatus, dropped, filestatus)))
