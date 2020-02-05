@@ -512,7 +512,7 @@ class LJSAApp(tkinter.ttk.Frame):
         n = sum(map(lambda c: c.get(), self._channels))
         maxfreq = MAXSAMPLERATE // n
 
-        for f in [500, 1000, 2000, 5000] + list(range(10000, maxfreq+1, 5000)):
+        for f in [500, 1000, 2000, 5000] + list(range(10000, maxfreq+5000, 5000)):
             if f > 1000:
                 txt = "%.2f kHz" % (f / 1000)
             else:
